@@ -90,7 +90,10 @@ enum mode {
   EBUR128_MODE_SAMPLE_PEAK = (1 << 4) | EBUR128_MODE_M,
   /** can call ebur128_true_peak */
   EBUR128_MODE_TRUE_PEAK = (1 << 5) | EBUR128_MODE_M | EBUR128_MODE_SAMPLE_PEAK,
-  /** uses histogram algorithm to calculate loudness */
+  /** uses histogram algorithm to calculate loudness. Only affects
+   *  ebur128_loudness_global(), ebur128_loudness_range() and
+   *  ebur128_relative_threshold(); momentary/shortterm/window loudness and
+   *  peak measurements are computed the same way regardless of this flag. */
   EBUR128_MODE_HISTOGRAM = (1 << 6)
 };
 

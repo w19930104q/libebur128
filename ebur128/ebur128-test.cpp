@@ -1237,6 +1237,151 @@ static bool test_relative_threshold() {
   return true;
 }
 
+namespace {
+
+// Regression test: EBUR128_MODE_HISTOGRAM must actually engage. Integrated
+// loudness, loudness range and relative threshold are computed from the block
+// energy histograms, and the results must agree with the percentile (block
+// list) method within one histogram bin (0.1 LU). The histogram quantization
+// also means the results are expected to differ ever so slightly from plain
+// mode; bit-identical results would mean the histogram bins never participate
+// in the computation.
+constexpr unsigned long histogram_test_samplerate = 48000;
+constexpr double histogram_test_tolerance = 0.1;
+constexpr double histogram_test_lra_tolerance = 0.2;
+
+std::vector<double> make_histogram_test_sine(double seconds,
+                                             double amplitude,
+                                             double frequency) {
+  const std::size_t frames =
+      static_cast<std::size_t>(seconds * histogram_test_samplerate);
+  std::vector<double> samples(frames);
+  for (std::size_t i = 0; i < frames; ++i) {
+    samples[i] = amplitude *
+                 std::sin(2.0 * std::numbers::pi * frequency *
+                          static_cast<double>(i) / histogram_test_samplerate);
+  }
+  return samples;
+}
+
+std::vector<double> make_histogram_test_varying(double seconds) {
+  constexpr double amplitudes[] = {0.5, 0.05, 0.2, 0.01};
+  const std::size_t frames =
+      static_cast<std::size_t>(seconds * histogram_test_samplerate);
+  std::vector<double> samples(frames);
+  for (std::size_t i = 0; i < frames; ++i) {
+    const std::size_t segment = i / (2 * histogram_test_samplerate);
+    samples[i] = amplitudes[segment % 4] *
+                 std::sin(2.0 * std::numbers::pi * 440.0 *
+                          static_cast<double>(i) / histogram_test_samplerate);
+  }
+  return samples;
+}
+
+std::vector<double> make_histogram_test_peaky(double seconds) {
+  const std::size_t frames =
+      static_cast<std::size_t>(seconds * histogram_test_samplerate);
+  std::vector<double> samples(frames);
+  for (std::size_t i = 0; i < frames; ++i) {
+    const double t = static_cast<double>(i) / histogram_test_samplerate;
+    const double phase = t - 3.0 * std::floor(t / 3.0);
+    const double amplitude = phase < 0.1 ? 0.9 : 0.02;
+    samples[i] = amplitude *
+                 std::sin(2.0 * std::numbers::pi * 997.0 *
+                          static_cast<double>(i) / histogram_test_samplerate);
+  }
+  return samples;
+}
+
+bool compare_histogram_metric(const char* scenario,
+                              const char* metric,
+                              double plain,
+                              double histogram,
+                              double tolerance,
+                              bool& engaged) {
+  if (std::isinf(plain) || std::isinf(histogram)) {
+    if (std::isinf(plain) && std::isinf(histogram) &&
+        (plain > 0) == (histogram > 0)) {
+      std::printf("PASS %s: %s = %f in both modes\n", scenario, metric,
+                  plain);
+      return true;
+    }
+    std::fprintf(stderr, "%s: %s: plain = %f, histogram = %f\n", scenario,
+                 metric, plain, histogram);
+    return false;
+  }
+  const double diff = std::fabs(plain - histogram);
+  if (diff > tolerance) {
+    std::fprintf(stderr,
+                 "%s: %s: plain = %f, histogram = %f (diff %f > %f)\n",
+                 scenario, metric, plain, histogram, diff, tolerance);
+    return false;
+  }
+  if (diff > 1e-9) {
+    engaged = true;
+  }
+  std::printf("PASS %s: %s: plain = %f, histogram = %f (diff %f)\n", scenario,
+              metric, plain, histogram, diff);
+  return true;
+}
+
+bool run_histogram_scenario(const char* name,
+                            const std::vector<double>& samples,
+                            bool expect_engaged) {
+  ebur128::state plain_state(
+      ebur128::channel{1}, ebur128::samplerate{histogram_test_samplerate},
+      ebur128::mode::i | ebur128::mode::lra);
+  ebur128::state histogram_state(
+      ebur128::channel{1}, ebur128::samplerate{histogram_test_samplerate},
+      ebur128::mode::i | ebur128::mode::lra | ebur128::mode::histogram);
+  plain_state.add_frames(
+      ebur128::audio_data_view(samples, ebur128::channel{1}));
+  histogram_state.add_frames(
+      ebur128::audio_data_view(samples, ebur128::channel{1}));
+
+  bool engaged = false;
+  bool ok = true;
+  ok &= compare_histogram_metric(name, "integrated",
+                                 plain_state.loudness_global(),
+                                 histogram_state.loudness_global(),
+                                 histogram_test_tolerance, engaged);
+  ok &= compare_histogram_metric(name, "LRA", plain_state.loudness_range(),
+                                 histogram_state.loudness_range(),
+                                 histogram_test_lra_tolerance, engaged);
+  ok &= compare_histogram_metric(name, "relative threshold",
+                                 plain_state.relative_threshold(),
+                                 histogram_state.relative_threshold(),
+                                 histogram_test_tolerance, engaged);
+  if (expect_engaged && !engaged) {
+    std::fprintf(stderr,
+                 "%s: histogram mode did not engage: results are "
+                 "bit-identical to plain mode\n",
+                 name);
+    ok = false;
+  }
+  return ok;
+}
+
+} // namespace
+
+static bool test_histogram_matches_plain() {
+  bool ok = true;
+  ok &= run_histogram_scenario("short programme (2.5s)",
+                               make_histogram_test_sine(2.5, 0.3, 440.0),
+                               true);
+  ok &= run_histogram_scenario("constant loudness (20s)",
+                               make_histogram_test_sine(20.0, 0.3, 440.0),
+                               true);
+  ok &= run_histogram_scenario("peaky (30s)", make_histogram_test_peaky(30.0),
+                               true);
+  ok &= run_histogram_scenario("varying segments (40s)",
+                               make_histogram_test_varying(40.0), true);
+  ok &= run_histogram_scenario(
+      "silence (5s)",
+      std::vector<double>(5 * histogram_test_samplerate, 0.0), false);
+  return ok;
+}
+
 static bool test_momentary_loudness() {
   {
     ebur128::state s(ebur128::channel{2}, ebur128::samplerate{48000},
@@ -1570,6 +1715,7 @@ int main(int argc, char** argv) {
   register_test(test_loudness_range_multiple);
   register_test(test_loudness_range_partial_frames);
   register_test(test_relative_threshold);
+  register_test(test_histogram_matches_plain);
   register_test(test_momentary_loudness);
   register_test(test_shortterm_loudness);
   register_test(test_true_peak);
