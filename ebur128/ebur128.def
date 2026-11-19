@@ -15,12 +15,16 @@ EXPORTS
 	ebur128_loudness_global
 	ebur128_loudness_global_multiple
 	ebur128_loudness_momentary
+	ebur128_loudness_momentary_multiple
 	ebur128_loudness_shortterm
+	ebur128_loudness_shortterm_multiple
 	ebur128_loudness_window
 	ebur128_loudness_range
 	ebur128_loudness_range_multiple
 	ebur128_sample_peak
 	ebur128_prev_sample_peak
+	ebur128_sample_peak_multiple
 	ebur128_true_peak
 	ebur128_prev_true_peak
+	ebur128_true_peak_multiple
 	ebur128_relative_threshold

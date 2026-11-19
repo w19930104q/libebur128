@@ -483,6 +483,87 @@ void configure_test_signal_channels(ebur128::state& s, unsigned int channels) {
   s.set_channel(ebur128::channel{4}, EBUR128_RIGHT_SURROUND);
 }
 
+std::vector<double> make_sine_samples(std::size_t frames,
+                                      std::size_t channels,
+                                      unsigned long samplerate,
+                                      double amplitude,
+                                      double frequency) {
+  std::vector<double> samples(frames * channels);
+  for (std::size_t i = 0; i < frames; ++i) {
+    const double sample =
+        amplitude *
+        std::sin(2.0 * std::numbers::pi * frequency * static_cast<double>(i) /
+                 static_cast<double>(samplerate));
+    for (std::size_t c = 0; c < channels; ++c) {
+      samples[i * channels + c] = sample;
+    }
+  }
+  return samples;
+}
+
+struct segmented_signal {
+  std::vector<double> samples;
+  std::vector<std::size_t> segment_frames;
+};
+
+// A signal of three 5s sine bursts (each followed by 0.5s of silence, so
+// that the filter state at each segment boundary is negligible) and a final
+// 0.3s burst that is shorter than both the momentary and the short-term
+// window.
+segmented_signal make_segmented_signal(std::size_t channels,
+                                       unsigned long samplerate,
+                                       double amplitude) {
+  segmented_signal signal;
+  const std::size_t burst_frames = 5 * samplerate;
+  const std::size_t guard_frames = samplerate / 2;
+  const std::size_t tail_frames = 3 * samplerate / 10;
+
+  for (int k = 0; k < 3; ++k) {
+    const auto burst = make_sine_samples(burst_frames, channels, samplerate,
+                                         amplitude, 1000.0);
+    signal.samples.insert(signal.samples.end(), burst.begin(), burst.end());
+    signal.samples.resize(signal.samples.size() + guard_frames * channels,
+                          0.0);
+    signal.segment_frames.push_back(burst_frames + guard_frames);
+  }
+  const auto tail = make_sine_samples(tail_frames, channels, samplerate,
+                                      amplitude, 1000.0);
+  signal.samples.insert(signal.samples.end(), tail.begin(), tail.end());
+  signal.segment_frames.push_back(tail_frames);
+
+  return signal;
+}
+
+// Two 1s stereo bursts separated by 0.1s of silence. The maximum of channel
+// 0 is in the first segment, the maximum of channel 1 is in the second
+// segment.
+std::vector<double> make_peak_test_signal(unsigned long samplerate,
+                                          std::size_t& first_segment_frames) {
+  const std::size_t burst_frames = samplerate;
+  const std::size_t guard_frames = samplerate / 10;
+  std::vector<double> samples;
+  samples.reserve((2 * burst_frames + guard_frames) * 2);
+
+  for (std::size_t i = 0; i < burst_frames; ++i) {
+    const double sample =
+        std::sin(2.0 * std::numbers::pi * 1000.0 * static_cast<double>(i) /
+                 static_cast<double>(samplerate));
+    samples.push_back(0.9 * sample);
+    samples.push_back(0.1 * sample);
+  }
+  samples.resize(samples.size() + guard_frames * 2, 0.0);
+  for (std::size_t i = 0; i < burst_frames; ++i) {
+    const double sample =
+        std::sin(2.0 * std::numbers::pi * 1000.0 * static_cast<double>(i) /
+                 static_cast<double>(samplerate));
+    samples.push_back(0.1 * sample);
+    samples.push_back(0.7 * sample);
+  }
+
+  first_segment_frames = burst_frames + guard_frames;
+  return samples;
+}
+
 ebur128::mode test_signal_mode(ebur128::mode mode, bool histogram) {
   return histogram ? mode | ebur128::mode::histogram : mode;
 }
@@ -1277,6 +1358,219 @@ static bool test_shortterm_loudness() {
   return true;
 }
 
+static bool test_momentary_loudness_multiple() {
+  constexpr std::size_t samplerate = 48000;
+  constexpr std::size_t channels = 2;
+  const double amplitude = std::pow(10.0, -23.0 / 20.0);
+
+  // Without any audio data the result is -HUGE_VAL, just like in the single
+  // state case. NULL states are skipped.
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate}, ebur128::mode::m);
+    states.emplace_back();
+
+    assert(ebur128::state::loudness_momentary_multiple(states) == -HUGE_VAL);
+  }
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back();
+    states.emplace_back();
+
+    assert(ebur128::state::loudness_momentary_multiple(states) == -HUGE_VAL);
+  }
+
+  // If the states contain less audio data than the size of the window, the
+  // remaining frames are treated as silence, just like in the single state
+  // case.
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate}, ebur128::mode::m);
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate}, ebur128::mode::m);
+
+    const std::vector<double> silence(samplerate / 10 * channels, 0.0);
+    states[0].add_frames(
+        ebur128::audio_data_view(silence, ebur128::channel{channels}));
+    states[1].add_frames(
+        ebur128::audio_data_view(silence, ebur128::channel{channels}));
+
+    assert(ebur128::state::loudness_momentary_multiple(states) == -HUGE_VAL);
+  }
+
+  // A signal split into multiple segments must give the same result as if
+  // the complete signal had been added to a single state. The last segment
+  // is shorter than the 400ms window, so the result depends on the audio
+  // data of more than one state.
+  {
+    const auto signal = make_segmented_signal(channels, samplerate, amplitude);
+
+    ebur128::state single(ebur128::channel{channels},
+                          ebur128::samplerate{samplerate}, ebur128::mode::m);
+    single.add_frames(
+        ebur128::audio_data_view(signal.samples, ebur128::channel{channels}));
+
+    std::vector<ebur128::state> states;
+    std::size_t offset = 0;
+    for (const std::size_t frames : signal.segment_frames) {
+      states.emplace_back(ebur128::channel{channels},
+                          ebur128::samplerate{samplerate}, ebur128::mode::m);
+      states.back().add_frames(ebur128::audio_data_view(
+          std::span<const double>(signal.samples.data() + offset * channels,
+                                  frames * channels),
+          ebur128::channel{channels}));
+      offset += frames;
+    }
+    // states without any audio data and NULL states are skipped
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate}, ebur128::mode::m);
+    states.emplace_back();
+
+    assert(std::fabs(ebur128::state::loudness_momentary_multiple(states) -
+                     single.loudness_momentary()) <= 1e-6);
+  }
+
+  // States with different maximum windows can be mixed, as long as every
+  // state can store the requested 400ms window.
+  {
+    std::vector<double> input;
+    const auto append = [](std::vector<double>& dst,
+                           const std::vector<double>& src) {
+      dst.insert(dst.end(), src.begin(), src.end());
+    };
+    const auto burst =
+        make_sine_samples(samplerate, channels, samplerate, amplitude, 1000.0);
+    const std::vector<double> guard(samplerate / 2 * channels, 0.0);
+    append(input, burst);
+    append(input, guard);
+    append(input, burst);
+    append(input, guard);
+    append(input, burst);
+
+    ebur128::state single(ebur128::channel{channels},
+                          ebur128::samplerate{samplerate}, ebur128::mode::m);
+    single.add_frames(ebur128::audio_data_view(input, ebur128::channel{channels}));
+
+    const std::size_t segment_frames = samplerate + samplerate / 2;
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate},
+                        ebur128::mode::s); /* 3000ms window */
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate}, ebur128::mode::m);
+    states.back().set_max_window(std::chrono::milliseconds{1000});
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate},
+                        ebur128::mode::m); /* 400ms window */
+    for (std::size_t k = 0; k < 2; ++k) {
+      states[k].add_frames(ebur128::audio_data_view(
+          std::span<const double>(input.data() + k * segment_frames * channels,
+                                  segment_frames * channels),
+          ebur128::channel{channels}));
+    }
+    states[2].add_frames(ebur128::audio_data_view(
+        std::span<const double>(input.data() + 2 * segment_frames * channels,
+                                samplerate * channels),
+        ebur128::channel{channels}));
+
+    assert(std::fabs(ebur128::state::loudness_momentary_multiple(states) -
+                     single.loudness_momentary()) <= 1e-6);
+  }
+
+  return true;
+}
+
+static bool test_shortterm_loudness_multiple() {
+  constexpr std::size_t samplerate = 48000;
+  constexpr std::size_t channels = 2;
+  const double amplitude = std::pow(10.0, -23.0 / 20.0);
+
+  // Without any audio data the result is -HUGE_VAL, just like in the single
+  // state case. NULL states are skipped.
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate}, ebur128::mode::s);
+    states.emplace_back();
+
+    assert(ebur128::state::loudness_shortterm_multiple(states) == -HUGE_VAL);
+  }
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back();
+    states.emplace_back();
+
+    assert(ebur128::state::loudness_shortterm_multiple(states) == -HUGE_VAL);
+  }
+
+  // All states must be able to store 3s of audio data.
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate},
+                        ebur128::mode::m); /* 400ms window */
+    try {
+      (void) ebur128::state::loudness_shortterm_multiple(states);
+      assert(false);
+    } catch (const ebur128::invalid_mode_error&) {
+    }
+  }
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate}, ebur128::mode::s);
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate}, ebur128::mode::m);
+    states.back().set_max_window(std::chrono::milliseconds{2500});
+    try {
+      (void) ebur128::state::loudness_shortterm_multiple(states);
+      assert(false);
+    } catch (const ebur128::invalid_mode_error&) {
+    }
+  }
+
+  // A signal split into multiple segments must give the same result as if
+  // the complete signal had been added to a single state. The last segment
+  // is shorter than the 3s window, so the result depends on the audio data
+  // of more than one state. Mixing different maximum windows is fine, as
+  // long as every state can store the requested 3s window.
+  {
+    const auto signal = make_segmented_signal(channels, samplerate, amplitude);
+
+    ebur128::state single(ebur128::channel{channels},
+                          ebur128::samplerate{samplerate}, ebur128::mode::s);
+    single.add_frames(
+        ebur128::audio_data_view(signal.samples, ebur128::channel{channels}));
+
+    std::vector<ebur128::state> states;
+    std::size_t offset = 0;
+    for (std::size_t k = 0; k < signal.segment_frames.size(); ++k) {
+      states.emplace_back(ebur128::channel{channels},
+                          ebur128::samplerate{samplerate}, ebur128::mode::s);
+      if (k == 1) {
+        states.back().set_max_window(std::chrono::milliseconds{5000});
+      }
+      states.back().add_frames(ebur128::audio_data_view(
+          std::span<const double>(
+              signal.samples.data() + offset * channels,
+              signal.segment_frames[k] * channels),
+          ebur128::channel{channels}));
+      offset += signal.segment_frames[k];
+    }
+    // states without any audio data and NULL states are skipped
+    states.emplace_back(ebur128::channel{channels},
+                        ebur128::samplerate{samplerate}, ebur128::mode::s);
+    states.emplace_back();
+
+    assert(std::fabs(ebur128::state::loudness_shortterm_multiple(states) -
+                     single.loudness_shortterm()) <= 1e-6);
+  }
+
+  return true;
+}
+
 static bool test_set_max_history() {
   // History cannot get smaller than the default 400ms (m) / 3000ms (lra).
   {
@@ -1516,6 +1810,176 @@ static bool test_prev_true_peak() {
   return true;
 }
 
+static bool test_sample_peak_multiple() {
+  constexpr std::size_t samplerate = 48000;
+
+  // All states must have EBUR128_MODE_SAMPLE_PEAK set.
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                        ebur128::mode::m);
+    try {
+      (void) ebur128::state::sample_peak_multiple(states, ebur128::channel{0});
+      assert(false);
+    } catch (const ebur128::invalid_mode_error&) {
+    }
+  }
+
+  // The channel index must be valid for all states.
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                        ebur128::mode::sample_peak);
+    try {
+      (void) ebur128::state::sample_peak_multiple(states, ebur128::channel{2});
+      assert(false);
+    } catch (const ebur128::invalid_channel_index_error&) {
+    }
+  }
+
+  // Without any audio data the result is 0.0, just like in the single state
+  // case. NULL states are skipped.
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back();
+    states.emplace_back(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                        ebur128::mode::sample_peak);
+
+    assert(ebur128::state::sample_peak_multiple(states, ebur128::channel{0}) ==
+           0.0);
+  }
+
+  // The result is the per-channel maximum over all states, just like if the
+  // complete signal had been added to a single state.
+  {
+    std::size_t first_segment_frames = 0;
+    const auto samples =
+        make_peak_test_signal(samplerate, first_segment_frames);
+    const std::size_t second_segment_frames =
+        samples.size() / 2 - first_segment_frames;
+
+    ebur128::state single(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                          ebur128::mode::sample_peak);
+    single.add_frames(ebur128::audio_data_view(samples, ebur128::channel{2}));
+
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                        ebur128::mode::sample_peak);
+    states.back().add_frames(ebur128::audio_data_view(
+        std::span<const double>(samples.data(), first_segment_frames * 2),
+        ebur128::channel{2}));
+    states.emplace_back(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                        ebur128::mode::sample_peak);
+    states.back().add_frames(ebur128::audio_data_view(
+        std::span<const double>(samples.data() + first_segment_frames * 2,
+                                second_segment_frames * 2),
+        ebur128::channel{2}));
+    states.emplace_back();
+
+    // the maxima of the two channels come from different states
+    assert(states[0].sample_peak(ebur128::channel{0}) >
+           states[1].sample_peak(ebur128::channel{0}));
+    assert(states[1].sample_peak(ebur128::channel{1}) >
+           states[0].sample_peak(ebur128::channel{1}));
+
+    for (const unsigned int c : {0u, 1u}) {
+      const ebur128::test::channel channel{c};
+      assert(ebur128::state::sample_peak_multiple(states, channel) ==
+             single.sample_peak(channel));
+    }
+    assert(std::fabs(ebur128::state::sample_peak_multiple(
+               states, ebur128::channel{0}) -
+                     0.9) <= 1e-12);
+    assert(std::fabs(ebur128::state::sample_peak_multiple(
+               states, ebur128::channel{1}) -
+                     0.7) <= 1e-12);
+  }
+
+  return true;
+}
+
+static bool test_true_peak_multiple() {
+  constexpr std::size_t samplerate = 48000;
+
+  // All states must have EBUR128_MODE_TRUE_PEAK set.
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                        ebur128::mode::sample_peak);
+    try {
+      (void) ebur128::state::true_peak_multiple(states, ebur128::channel{0});
+      assert(false);
+    } catch (const ebur128::invalid_mode_error&) {
+    }
+  }
+
+  // The channel index must be valid for all states.
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                        ebur128::mode::true_peak);
+    try {
+      (void) ebur128::state::true_peak_multiple(states, ebur128::channel{2});
+      assert(false);
+    } catch (const ebur128::invalid_channel_index_error&) {
+    }
+  }
+
+  // Without any audio data the result is 0.0, just like in the single state
+  // case. NULL states are skipped.
+  {
+    std::vector<ebur128::state> states;
+    states.emplace_back();
+    states.emplace_back(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                        ebur128::mode::true_peak);
+
+    assert(ebur128::state::true_peak_multiple(states, ebur128::channel{0}) ==
+           0.0);
+  }
+
+  // The result is the per-channel maximum over all states, just like if the
+  // complete signal had been added to a single state.
+  {
+    std::size_t first_segment_frames = 0;
+    const auto samples =
+        make_peak_test_signal(samplerate, first_segment_frames);
+    const std::size_t second_segment_frames =
+        samples.size() / 2 - first_segment_frames;
+
+    ebur128::state single(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                          ebur128::mode::true_peak);
+    single.add_frames(ebur128::audio_data_view(samples, ebur128::channel{2}));
+
+    std::vector<ebur128::state> states;
+    states.emplace_back(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                        ebur128::mode::true_peak);
+    states.back().add_frames(ebur128::audio_data_view(
+        std::span<const double>(samples.data(), first_segment_frames * 2),
+        ebur128::channel{2}));
+    states.emplace_back(ebur128::channel{2}, ebur128::samplerate{samplerate},
+                        ebur128::mode::true_peak);
+    states.back().add_frames(ebur128::audio_data_view(
+        std::span<const double>(samples.data() + first_segment_frames * 2,
+                                second_segment_frames * 2),
+        ebur128::channel{2}));
+    states.emplace_back();
+
+    // the maxima of the two channels come from different states
+    assert(states[0].true_peak(ebur128::channel{0}) >
+           states[1].true_peak(ebur128::channel{0}));
+    assert(states[1].true_peak(ebur128::channel{1}) >
+           states[0].true_peak(ebur128::channel{1}));
+
+    for (const unsigned int c : {0u, 1u}) {
+      const ebur128::test::channel channel{c};
+      assert(std::fabs(ebur128::state::true_peak_multiple(states, channel) -
+                       single.true_peak(channel)) <= 1e-12);
+    }
+  }
+
+  return true;
+}
+
 int main(int argc, char** argv) {
   const auto run_test = [&](std::string_view name, bool (*test)()) {
     std::string test_name(name);
@@ -1571,11 +2035,15 @@ int main(int argc, char** argv) {
   register_test(test_loudness_range_partial_frames);
   register_test(test_relative_threshold);
   register_test(test_momentary_loudness);
+  register_test(test_momentary_loudness_multiple);
   register_test(test_shortterm_loudness);
+  register_test(test_shortterm_loudness_multiple);
   register_test(test_true_peak);
   register_test(test_sample_peak);
   register_test(test_prev_true_peak);
   register_test(test_prev_sample_peak);
+  register_test(test_sample_peak_multiple);
+  register_test(test_true_peak_multiple);
   register_test_all_types(test_signal_1);
   register_test_all_types(test_signal_2);
   register_test_all_types(test_signal_3);

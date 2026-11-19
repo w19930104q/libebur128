@@ -261,6 +261,27 @@ int ebur128_loudness_global_multiple(ebur128_state** sts,
  *    - EBUR128_SUCCESS on success.
  */
 int ebur128_loudness_momentary(ebur128_state* st, double* out);
+/** \brief Get momentary loudness (last 400ms) in LUFS across multiple
+ *        instances.
+ *
+ *  The loudness is calculated over the last 400ms of the concatenation of
+ *  the audio that was added to the given states. The result is the same as
+ *  if all audio had been added to a single state. All states must be able
+ *  to store at least 400ms of audio data (see ebur128_set_max_window()).
+ *  NULL pointers in sts are skipped.
+ *
+ *  @param sts array of library states.
+ *  @param size length of sts
+ *  @param out momentary loudness in LUFS. -HUGE_VAL if result is negative
+ *             infinity.
+ *  @return
+ *    - EBUR128_SUCCESS on success.
+ *    - EBUR128_ERROR_INVALID_MODE if a state cannot store at least 400ms of
+ *      audio data.
+ */
+int ebur128_loudness_momentary_multiple(ebur128_state** sts,
+                                        size_t size,
+                                        double* out);
 /** \brief Get short-term loudness (last 3s) in LUFS.
  *
  *  @param st library state.
@@ -271,6 +292,27 @@ int ebur128_loudness_momentary(ebur128_state* st, double* out);
  *    - EBUR128_ERROR_INVALID_MODE if mode "EBUR128_MODE_S" has not been set.
  */
 int ebur128_loudness_shortterm(ebur128_state* st, double* out);
+/** \brief Get short-term loudness (last 3s) in LUFS across multiple
+ *        instances.
+ *
+ *  The loudness is calculated over the last 3s of the concatenation of the
+ *  audio that was added to the given states. The result is the same as if
+ *  all audio had been added to a single state. All states must be able to
+ *  store at least 3s of audio data (see ebur128_set_max_window()).
+ *  NULL pointers in sts are skipped.
+ *
+ *  @param sts array of library states.
+ *  @param size length of sts
+ *  @param out short-term loudness in LUFS. -HUGE_VAL if result is negative
+ *             infinity.
+ *  @return
+ *    - EBUR128_SUCCESS on success.
+ *    - EBUR128_ERROR_INVALID_MODE if a state cannot store at least 3s of
+ *      audio data.
+ */
+int ebur128_loudness_shortterm_multiple(ebur128_state** sts,
+                                        size_t size,
+                                        double* out);
 
 /** \brief Get loudness of the specified window in LUFS.
  *
@@ -354,6 +396,29 @@ int ebur128_prev_sample_peak(ebur128_state* st,
                              unsigned int channel_number,
                              double* out);
 
+/** \brief Get maximum sample peak from all frames that have been processed
+ *        across multiple instances.
+ *
+ *  Returns the maximum sample peak of the given channel over all states.
+ *  NULL pointers in sts are skipped.
+ *
+ *  The equation to convert to dBFS is: 20 * log10(out)
+ *
+ *  @param sts array of library states.
+ *  @param size length of sts
+ *  @param channel_number channel to analyse
+ *  @param out maximum sample peak in float format (1.0 is 0 dBFS)
+ *  @return
+ *    - EBUR128_SUCCESS on success.
+ *    - EBUR128_ERROR_INVALID_MODE if mode "EBUR128_MODE_SAMPLE_PEAK" has not
+ *      been set in one of the states.
+ *    - EBUR128_ERROR_INVALID_CHANNEL_INDEX if invalid channel index.
+ */
+int ebur128_sample_peak_multiple(ebur128_state** sts,
+                                 size_t size,
+                                 unsigned int channel_number,
+                                 double* out);
+
 /** \brief Get maximum true peak from all frames that have been processed.
  *
  *  Uses an implementation defined algorithm to calculate the true peak. Do not
@@ -403,6 +468,33 @@ int ebur128_true_peak(ebur128_state* st,
 int ebur128_prev_true_peak(ebur128_state* st,
                            unsigned int channel_number,
                            double* out);
+
+/** \brief Get maximum true peak from all frames that have been processed
+ *        across multiple instances.
+ *
+ *  Returns the maximum true peak of the given channel over all states.
+ *  NULL pointers in sts are skipped.
+ *
+ *  Uses an implementation defined algorithm to calculate the true peak. Do not
+ *  try to compare resulting values across different versions of the library,
+ *  as the algorithm may change.
+ *
+ *  The equation to convert to dBTP is: 20 * log10(out)
+ *
+ *  @param sts array of library states.
+ *  @param size length of sts
+ *  @param channel_number channel to analyse
+ *  @param out maximum true peak in float format (1.0 is 0 dBTP)
+ *  @return
+ *    - EBUR128_SUCCESS on success.
+ *    - EBUR128_ERROR_INVALID_MODE if mode "EBUR128_MODE_TRUE_PEAK" has not
+ *      been set in one of the states.
+ *    - EBUR128_ERROR_INVALID_CHANNEL_INDEX if invalid channel index.
+ */
+int ebur128_true_peak_multiple(ebur128_state** sts,
+                               size_t size,
+                               unsigned int channel_number,
+                               double* out);
 
 /** \brief Get relative threshold in LUFS.
  *

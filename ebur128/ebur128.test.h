@@ -205,11 +205,41 @@ public:
     return out;
   }
 
+  template <std::ranges::range R>
+    requires std::same_as<state, std::ranges::range_value_t<R>>
+  static double loudness_shortterm_multiple(R&& states) {
+    auto states_ptrs = state::to_state_ptrs(std::forward<R>(states));
+
+    double out;
+    state::handle_error(
+        [&] {
+          return ebur128_loudness_shortterm_multiple(
+              states_ptrs.data(), states_ptrs.size(), &out);
+        },
+        "ebur128_loudness_shortterm_multiple");
+    return out;
+  }
+
   double loudness_momentary() const {
     double out;
     state::handle_error(
         [&] { return ebur128_loudness_momentary(state_, &out); },
         "ebur128_loudness_momentary");
+    return out;
+  }
+
+  template <std::ranges::range R>
+    requires std::same_as<state, std::ranges::range_value_t<R>>
+  static double loudness_momentary_multiple(R&& states) {
+    auto states_ptrs = state::to_state_ptrs(std::forward<R>(states));
+
+    double out;
+    state::handle_error(
+        [&] {
+          return ebur128_loudness_momentary_multiple(
+              states_ptrs.data(), states_ptrs.size(), &out);
+        },
+        "ebur128_loudness_momentary_multiple");
     return out;
   }
 
@@ -235,6 +265,23 @@ public:
     return out;
   }
 
+  template <std::ranges::range R>
+    requires std::same_as<state, std::ranges::range_value_t<R>>
+  static double true_peak_multiple(R&& states,
+                                   ebur128::test::channel channel) {
+    auto states_ptrs = state::to_state_ptrs(std::forward<R>(states));
+
+    double out;
+    state::handle_error(
+        [&] {
+          return ebur128_true_peak_multiple(
+              states_ptrs.data(), states_ptrs.size(),
+              ebur128::test::to_underlying(channel), &out);
+        },
+        "ebur128_true_peak_multiple");
+    return out;
+  }
+
   double prev_true_peak(ebur128::test::channel channel) const {
     double out;
     state::handle_error(
@@ -254,6 +301,23 @@ public:
               state_, ebur128::test::to_underlying(channel), &out);
         },
         "ebur128_sample_peak");
+    return out;
+  }
+
+  template <std::ranges::range R>
+    requires std::same_as<state, std::ranges::range_value_t<R>>
+  static double sample_peak_multiple(R&& states,
+                                     ebur128::test::channel channel) {
+    auto states_ptrs = state::to_state_ptrs(std::forward<R>(states));
+
+    double out;
+    state::handle_error(
+        [&] {
+          return ebur128_sample_peak_multiple(
+              states_ptrs.data(), states_ptrs.size(),
+              ebur128::test::to_underlying(channel), &out);
+        },
+        "ebur128_sample_peak_multiple");
     return out;
   }
 
@@ -281,6 +345,17 @@ public:
   }
 
 private:
+  template <std::ranges::range R>
+    requires std::same_as<state, std::ranges::range_value_t<R>>
+  static std::vector<ebur128_state*> to_state_ptrs(R&& states) {
+    auto states_ptrs_view =
+        std::forward<R>(states) | std::views::transform([](const auto& state) {
+          return state.state_ptr();
+        });
+    return {std::ranges::begin(states_ptrs_view),
+            std::ranges::end(states_ptrs_view)};
+  }
+
   template <class F> static void handle_error(F f, const char* msg) {
     if constexpr (std::is_same_v<decltype(f()), void>) {
       return f();

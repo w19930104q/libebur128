@@ -160,6 +160,10 @@ struct ebur128_state_internal {
   size_t audio_data_frames;
   /** Current index for audio_data. */
   size_t audio_data_index;
+  /** How many frames of audio_data contain valid audio data. The rest of
+   *  the ring buffer is still zero initialized. Saturates at
+   *  audio_data_frames. */
+  size_t audio_data_frames_filled;
   /** How many frames are needed for a gating block. Will correspond to 400ms
    *  of audio at initialization, and 100ms after the first block (75% overlap
    *  as specified in the 2011 revision of BS1770). */
@@ -413,6 +417,7 @@ exit:
  * - `st->d->audio_data_frames`
  * - `st->d->needed_frames`
  * - `st->d->audio_data_index`
+ * - `st->d->audio_data_frames_filled`
  * - `st->d->short_term_frame_counter`
  *
  * ...appropriately.
@@ -443,6 +448,8 @@ static int ebur128_reinitialize_audio_data(ebur128_state* st,
   st->d->needed_frames = st->d->samples_in_100ms * 4;
   /* start at the beginning of the buffer */
   st->d->audio_data_index = 0;
+  /* the buffer contains no valid audio data yet */
+  st->d->audio_data_frames_filled = 0;
   /* reset short term frame counter */
   st->d->short_term_frame_counter = 0;
 
@@ -895,9 +902,11 @@ static size_t find_histogram_index(double energy) {
   return index_min;
 }
 
-static int ebur128_calc_gating_block(ebur128_state* st,
-                                     size_t frames_per_block,
-                                     double* optional_output) {
+/* Computes the sum of the squared samples of the last `frames` frames in the
+ * audio ring buffer, weighted by the channel map. The result is NOT divided
+ * by the number of frames. `frames` must not be larger than
+ * st->d->audio_data_frames. */
+static double ebur128_calc_block_energy(ebur128_state* st, size_t frames) {
   size_t i, c;
   double sum = 0.0;
   double channel_sum;
@@ -906,19 +915,19 @@ static int ebur128_calc_gating_block(ebur128_state* st,
       continue;
     }
     channel_sum = 0.0;
-    if (st->d->audio_data_index < frames_per_block * st->channels) {
+    if (st->d->audio_data_index < frames * st->channels) {
       for (i = 0; i < st->d->audio_data_index / st->channels; ++i) {
         channel_sum += st->d->audio_data[i * st->channels + c] *
                        st->d->audio_data[i * st->channels + c];
       }
       for (i = st->d->audio_data_frames -
-               (frames_per_block - st->d->audio_data_index / st->channels);
+               (frames - st->d->audio_data_index / st->channels);
            i < st->d->audio_data_frames; ++i) {
         channel_sum += st->d->audio_data[i * st->channels + c] *
                        st->d->audio_data[i * st->channels + c];
       }
     } else {
-      for (i = st->d->audio_data_index / st->channels - frames_per_block;
+      for (i = st->d->audio_data_index / st->channels - frames;
            i < st->d->audio_data_index / st->channels; ++i) {
         channel_sum += st->d->audio_data[i * st->channels + c] *
                        st->d->audio_data[i * st->channels + c];
@@ -936,6 +945,13 @@ static int ebur128_calc_gating_block(ebur128_state* st,
     }
     sum += channel_sum;
   }
+  return sum;
+}
+
+static int ebur128_calc_gating_block(ebur128_state* st,
+                                     size_t frames_per_block,
+                                     double* optional_output) {
+  double sum = ebur128_calc_block_energy(st, frames_per_block);
 
   sum /= (double) frames_per_block;
 
@@ -1116,6 +1132,15 @@ int ebur128_set_max_history(ebur128_state* st, unsigned long history) {
 
 static int ebur128_energy_shortterm(ebur128_state* st, double* out);
 
+/* Keeps track of how many frames of the audio ring buffer contain valid
+ * audio data (the rest is still zero initialized). */
+static void ebur128_update_frames_filled(ebur128_state* st, size_t frames) {
+  st->d->audio_data_frames_filled += frames;
+  if (st->d->audio_data_frames_filled > st->d->audio_data_frames) {
+    st->d->audio_data_frames_filled = st->d->audio_data_frames;
+  }
+}
+
 #define EBUR128_ADD_FRAMES(type)                                               \
   int ebur128_add_frames_##type(ebur128_state* st, const type* src,            \
                                 size_t frames) {                               \
@@ -1131,6 +1156,7 @@ static int ebur128_energy_shortterm(ebur128_state* st, double* out);
         src_index += st->d->needed_frames * st->channels;                      \
         frames -= st->d->needed_frames;                                        \
         st->d->audio_data_index += st->d->needed_frames * st->channels;        \
+        ebur128_update_frames_filled(st, st->d->needed_frames);                \
         /* calculate the new gating block */                                   \
         if ((st->mode & EBUR128_MODE_I) == EBUR128_MODE_I) {                   \
           if (ebur128_calc_gating_block(st, st->d->samples_in_100ms * 4,       \
@@ -1186,6 +1212,7 @@ static int ebur128_energy_shortterm(ebur128_state* st, double* out);
       } else {                                                                 \
         ebur128_filter_##type(st, src + src_index, frames);                    \
         st->d->audio_data_index += frames * st->channels;                      \
+        ebur128_update_frames_filled(st, frames);                              \
         if ((st->mode & EBUR128_MODE_LRA) == EBUR128_MODE_LRA) {               \
           st->d->short_term_frame_counter += frames;                           \
         }                                                                      \
@@ -1347,6 +1374,64 @@ static int ebur128_energy_shortterm(ebur128_state* st, double* out) {
   return ebur128_energy_in_interval(st, st->d->samples_in_100ms * 30, out);
 }
 
+/* Computes the energy of the last `window_ms` milliseconds of the
+ * concatenation of the audio that was added to the given states. All states
+ * must be able to store at least `window_ms` of audio data. The states are
+ * walked in reverse order; states whose ring buffer is not (yet) completely
+ * filled contribute only their valid frames. If the states do not contain
+ * enough audio data, the energy of the remaining frames is treated as zero,
+ * just like in the single state case. */
+static int ebur128_energy_in_interval_multiple(ebur128_state** sts,
+                                               size_t size,
+                                               unsigned long window_ms,
+                                               double* out) {
+  size_t i;
+  size_t interval_frames = 0;
+  size_t frames_remaining;
+  double sum = 0.0;
+
+  /* All states must be able to store `window_ms` of audio data. */
+  for (i = 0; i < size; ++i) {
+    size_t state_interval_frames;
+    if (!sts[i]) {
+      continue;
+    }
+    state_interval_frames =
+        (size_t) (sts[i]->d->samples_in_100ms * (window_ms / 100));
+    if (state_interval_frames > sts[i]->d->audio_data_frames) {
+      return EBUR128_ERROR_INVALID_MODE;
+    }
+    if (interval_frames == 0) {
+      interval_frames = state_interval_frames;
+    }
+  }
+
+  if (interval_frames == 0) {
+    *out = 0.0;
+    return EBUR128_SUCCESS;
+  }
+
+  frames_remaining = interval_frames;
+  for (i = size; i-- > 0 && frames_remaining > 0;) {
+    size_t frames_to_use;
+    if (!sts[i]) {
+      continue;
+    }
+    frames_to_use = sts[i]->d->audio_data_frames_filled;
+    if (frames_to_use > frames_remaining) {
+      frames_to_use = frames_remaining;
+    }
+    if (frames_to_use == 0) {
+      continue;
+    }
+    sum += ebur128_calc_block_energy(sts[i], frames_to_use);
+    frames_remaining -= frames_to_use;
+  }
+
+  *out = sum / (double) interval_frames;
+  return EBUR128_SUCCESS;
+}
+
 int ebur128_loudness_momentary(ebur128_state* st, double* out) {
   double energy;
   int error;
@@ -1365,11 +1450,51 @@ int ebur128_loudness_momentary(ebur128_state* st, double* out) {
   return EBUR128_SUCCESS;
 }
 
+int ebur128_loudness_momentary_multiple(ebur128_state** sts,
+                                        size_t size,
+                                        double* out) {
+  double energy;
+  int error;
+
+  error = ebur128_energy_in_interval_multiple(sts, size, 400, &energy);
+  if (error) {    /* LCOV_EXCL_BR_LINE */
+    return error; /* LCOV_EXCL_LINE */
+  } /*               LCOV_EXCL_LINE */
+
+  if (energy <= 0.0) {
+    *out = -HUGE_VAL;
+    return EBUR128_SUCCESS;
+  }
+
+  *out = ebur128_energy_to_loudness(energy);
+  return EBUR128_SUCCESS;
+}
+
 int ebur128_loudness_shortterm(ebur128_state* st, double* out) {
   double energy;
   int error;
 
   error = ebur128_energy_shortterm(st, &energy);
+  if (error) {
+    return error;
+  }
+
+  if (energy <= 0.0) {
+    *out = -HUGE_VAL;
+    return EBUR128_SUCCESS;
+  }
+
+  *out = ebur128_energy_to_loudness(energy);
+  return EBUR128_SUCCESS;
+}
+
+int ebur128_loudness_shortterm_multiple(ebur128_state** sts,
+                                        size_t size,
+                                        double* out) {
+  double energy;
+  int error;
+
+  error = ebur128_energy_in_interval_multiple(sts, size, 3000, &energy);
   if (error) {
     return error;
   }
@@ -1611,6 +1736,33 @@ int ebur128_prev_sample_peak(ebur128_state* st,
   return EBUR128_SUCCESS;
 }
 
+int ebur128_sample_peak_multiple(ebur128_state** sts,
+                                 size_t size,
+                                 unsigned int channel_number,
+                                 double* out) {
+  size_t i;
+  double max_peak = 0.0;
+
+  for (i = 0; i < size; ++i) {
+    if (!sts[i]) {
+      continue;
+    }
+    if ((sts[i]->mode & EBUR128_MODE_SAMPLE_PEAK) !=
+        EBUR128_MODE_SAMPLE_PEAK) {
+      return EBUR128_ERROR_INVALID_MODE;
+    }
+    if (channel_number >= sts[i]->channels) {
+      return EBUR128_ERROR_INVALID_CHANNEL_INDEX;
+    }
+    if (sts[i]->d->sample_peak[channel_number] > max_peak) {
+      max_peak = sts[i]->d->sample_peak[channel_number];
+    }
+  }
+
+  *out = max_peak;
+  return EBUR128_SUCCESS;
+}
+
 int ebur128_true_peak(ebur128_state* st,
                       unsigned int channel_number,
                       double* out) {
@@ -1640,5 +1792,34 @@ int ebur128_prev_true_peak(ebur128_state* st,
 
   *out = EBUR128_MAX(st->d->prev_true_peak[channel_number],
                      st->d->prev_sample_peak[channel_number]);
+  return EBUR128_SUCCESS;
+}
+
+int ebur128_true_peak_multiple(ebur128_state** sts,
+                               size_t size,
+                               unsigned int channel_number,
+                               double* out) {
+  size_t i;
+  double max_peak = 0.0;
+
+  for (i = 0; i < size; ++i) {
+    double state_peak;
+    if (!sts[i]) {
+      continue;
+    }
+    if ((sts[i]->mode & EBUR128_MODE_TRUE_PEAK) != EBUR128_MODE_TRUE_PEAK) {
+      return EBUR128_ERROR_INVALID_MODE;
+    }
+    if (channel_number >= sts[i]->channels) {
+      return EBUR128_ERROR_INVALID_CHANNEL_INDEX;
+    }
+    state_peak = EBUR128_MAX(sts[i]->d->true_peak[channel_number],
+                             sts[i]->d->sample_peak[channel_number]);
+    if (state_peak > max_peak) {
+      max_peak = state_peak;
+    }
+  }
+
+  *out = max_peak;
   return EBUR128_SUCCESS;
 }
