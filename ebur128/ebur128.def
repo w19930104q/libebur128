@@ -12,6 +12,8 @@ EXPORTS
 	ebur128_add_frames_int
 	ebur128_add_frames_float
 	ebur128_add_frames_double
+	ebur128_add_frames_planar_float
+	ebur128_add_frames_planar_double
 	ebur128_loudness_global
 	ebur128_loudness_global_multiple
 	ebur128_loudness_momentary

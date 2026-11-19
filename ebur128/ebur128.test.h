@@ -69,6 +69,23 @@ audio_data_view(R&&, ebur128::test::channel)
 
 //
 
+template <ebur128::test_signals::sample_type T> class planar_audio_data_view {
+public:
+  explicit planar_audio_data_view(std::span<const T* const> data,
+                                  std::size_t frames)
+      : data_(data), frames_(frames) {}
+
+  std::span<const T* const> data() const { return data_; }
+  std::size_t frames() const { return frames_; }
+  std::size_t channels() const { return data_.size(); }
+
+private:
+  std::span<const T* const> data_;
+  std::size_t frames_;
+};
+
+//
+
 class state {
 public:
   explicit state() = default;
@@ -94,6 +111,9 @@ public:
 
   template <ebur128::test_signals::sample_type T>
   void add_frames(audio_data_view<T> data);
+
+  template <ebur128::test_signals::sample_type T>
+  void add_frames(planar_audio_data_view<T> data);
 
   void set_channel(ebur128::test::channel channel_index, ::channel channel) {
     state::handle_error(
@@ -348,6 +368,26 @@ inline void state::add_frames<double>(audio_data_view<double> data) {
                                          data.frames());
       },
       "ebur128_add_frames_double");
+}
+
+template <>
+inline void state::add_frames<float>(planar_audio_data_view<float> data) {
+  state::handle_error(
+      [&] {
+        return ebur128_add_frames_planar_float(state_, data.data().data(),
+                                               data.frames());
+      },
+      "ebur128_add_frames_planar_float");
+}
+
+template <>
+inline void state::add_frames<double>(planar_audio_data_view<double> data) {
+  state::handle_error(
+      [&] {
+        return ebur128_add_frames_planar_double(state_, data.data().data(),
+                                                data.frames());
+      },
+      "ebur128_add_frames_planar_double");
 }
 
 } // namespace ebur128::test

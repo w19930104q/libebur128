@@ -1516,6 +1516,220 @@ static bool test_prev_true_peak() {
   return true;
 }
 
+//
+
+template <ebur128::sample_type T>
+static std::vector<std::vector<T>>
+make_planar_test_signal(unsigned int channels, std::size_t frames,
+                        std::size_t samplerate) {
+  std::vector<std::vector<T>> signal(channels, std::vector<T>(frames));
+  for (std::size_t c = 0; c < channels; ++c) {
+    for (std::size_t i = 0; i < frames; ++i) {
+      const double t =
+          static_cast<double>(i) / static_cast<double>(samplerate);
+      const double v =
+          0.5 * std::sin(2.0 * std::numbers::pi * (440.0 + 110.0 * c) * t) +
+          0.25 * std::sin(2.0 * std::numbers::pi * 50.0 * t);
+      signal[c][i] = static_cast<T>(v);
+    }
+  }
+  return signal;
+}
+
+template <ebur128::sample_type T>
+static std::vector<T> interleave(const std::vector<std::vector<T>>& planar) {
+  const std::size_t channels = planar.size();
+  const std::size_t frames = planar.front().size();
+  std::vector<T> interleaved(frames * channels);
+  for (std::size_t i = 0; i < frames; ++i) {
+    for (std::size_t c = 0; c < channels; ++c) {
+      interleaved[i * channels + c] = planar[c][i];
+    }
+  }
+  return interleaved;
+}
+
+template <ebur128::sample_type T>
+static std::vector<const T*>
+planar_channel_pointers(const std::vector<std::vector<T>>& planar,
+                        std::size_t offset) {
+  std::vector<const T*> pointers;
+  pointers.reserve(planar.size());
+  for (const auto& channel : planar) {
+    pointers.push_back(channel.data() + offset);
+  }
+  return pointers;
+}
+
+const ebur128::mode planar_test_mode =
+    ebur128::mode::m | ebur128::mode::s | ebur128::mode::i |
+    ebur128::mode::lra | ebur128::mode::sample_peak | ebur128::mode::true_peak |
+    ebur128::mode::histogram;
+
+// The planar and the interleaved interface must produce bit-identical
+// results, so compare with exact equality.
+static bool check_states_equal(const ebur128::state& a, const ebur128::state& b,
+                               unsigned int channels) {
+  bool ok = true;
+  const auto check = [&](std::string_view what, double x, double y) {
+    if (!(x == y)) {
+      std::fprintf(stderr, "%.*s mismatch: %.17g != %.17g\n",
+                   static_cast<int>(what.size()), what.data(), x, y);
+      ok = false;
+    }
+  };
+  check("loudness_global", a.loudness_global(), b.loudness_global());
+  check("loudness_momentary", a.loudness_momentary(), b.loudness_momentary());
+  check("loudness_shortterm", a.loudness_shortterm(), b.loudness_shortterm());
+  check("loudness_range", a.loudness_range(), b.loudness_range());
+  check("relative_threshold", a.relative_threshold(), b.relative_threshold());
+  for (unsigned int c = 0; c < channels; ++c) {
+    check("sample_peak", a.sample_peak(ebur128::channel{c}),
+          b.sample_peak(ebur128::channel{c}));
+    check("true_peak", a.true_peak(ebur128::channel{c}),
+          b.true_peak(ebur128::channel{c}));
+  }
+  return ok;
+}
+
+// The same signal fed through the planar and the interleaved interface must
+// give bit-identical results.
+template <ebur128::sample_type T>
+static bool test_planar_interleaved_equivalence() {
+  constexpr std::size_t samplerate = 48000;
+  constexpr unsigned int channels = 2;
+  constexpr std::size_t frames = 2 * samplerate + 1234;
+
+  const auto planar =
+      make_planar_test_signal<T>(channels, frames, samplerate);
+  const auto interleaved = interleave(planar);
+
+  ebur128::state from_interleaved(ebur128::channel{channels},
+                                  ebur128::samplerate{samplerate},
+                                  planar_test_mode);
+  from_interleaved.add_frames(
+      ebur128::audio_data_view(interleaved, ebur128::channel{channels}));
+
+  ebur128::state from_planar(ebur128::channel{channels},
+                             ebur128::samplerate{samplerate},
+                             planar_test_mode);
+  const auto pointers = planar_channel_pointers(planar, 0);
+  from_planar.add_frames(ebur128::planar_audio_data_view<T>(pointers, frames));
+
+  return check_states_equal(from_interleaved, from_planar, channels);
+}
+
+// Feeding the planar interface in non-uniformly sized chunks (not aligned to
+// the internal 100ms blocks) must not change the results.
+template <ebur128::sample_type T>
+static bool test_planar_chunked_feeding() {
+  constexpr std::size_t samplerate = 48000;
+  constexpr unsigned int channels = 2;
+  constexpr std::size_t frames = 3 * samplerate + 777;
+
+  const auto planar = make_planar_test_signal<T>(channels, frames, samplerate);
+  const auto interleaved = interleave(planar);
+
+  ebur128::state reference(ebur128::channel{channels},
+                           ebur128::samplerate{samplerate}, planar_test_mode);
+  reference.add_frames(
+      ebur128::audio_data_view(interleaved, ebur128::channel{channels}));
+
+  ebur128::state chunked(ebur128::channel{channels},
+                         ebur128::samplerate{samplerate}, planar_test_mode);
+  const std::vector<std::size_t> chunk_sizes = {1,    4801, 7,   9600, 13,
+                                                4799, 100,  3,   4800, 12345};
+  std::size_t offset = 0;
+  for (std::size_t n = 0; offset < frames; ++n) {
+    const std::size_t chunk =
+        std::min(chunk_sizes[n % chunk_sizes.size()], frames - offset);
+    const auto pointers = planar_channel_pointers(planar, offset);
+    chunked.add_frames(ebur128::planar_audio_data_view<T>(pointers, chunk));
+    offset += chunk;
+  }
+
+  return check_states_equal(reference, chunked, channels);
+}
+
+// An all-zero tail whose length is not a multiple of the internal 100ms block
+// size must be handled identically by both interfaces.
+template <ebur128::sample_type T>
+static bool test_planar_unaligned_zero_tail() {
+  constexpr std::size_t samplerate = 48000;
+  constexpr unsigned int channels = 2;
+  constexpr std::size_t signal_frames = samplerate;
+  constexpr std::size_t tail_frames = 2 * 4800 + 977;
+  constexpr std::size_t frames = signal_frames + tail_frames;
+
+  auto planar = make_planar_test_signal<T>(channels, frames, samplerate);
+  for (auto& channel : planar) {
+    std::fill(channel.begin() + static_cast<std::ptrdiff_t>(signal_frames),
+              channel.end(), T{0});
+  }
+  const auto interleaved = interleave(planar);
+
+  ebur128::state from_interleaved(ebur128::channel{channels},
+                                  ebur128::samplerate{samplerate},
+                                  planar_test_mode);
+  ebur128::state from_planar(ebur128::channel{channels},
+                             ebur128::samplerate{samplerate},
+                             planar_test_mode);
+
+  // Feed signal and unaligned zero tail in two separate calls.
+  from_interleaved.add_frames(ebur128::audio_data_view(
+      std::span<const T>(interleaved).first(signal_frames * channels),
+      ebur128::channel{channels}));
+  from_interleaved.add_frames(ebur128::audio_data_view(
+      std::span<const T>(interleaved).subspan(signal_frames * channels),
+      ebur128::channel{channels}));
+
+  auto pointers = planar_channel_pointers(planar, 0);
+  from_planar.add_frames(
+      ebur128::planar_audio_data_view<T>(pointers, signal_frames));
+  pointers = planar_channel_pointers(planar, signal_frames);
+  from_planar.add_frames(
+      ebur128::planar_audio_data_view<T>(pointers, tail_frames));
+
+  return check_states_equal(from_interleaved, from_planar, channels);
+}
+
+// A call with zero frames must succeed and must not change any results, just
+// like with the interleaved interface.
+static bool test_planar_zero_frames() {
+  constexpr std::size_t samplerate = 48000;
+  constexpr unsigned int channels = 2;
+  constexpr std::size_t frames = samplerate / 2;
+
+  const auto run = [&]<ebur128::sample_type T>() {
+    const auto planar =
+        make_planar_test_signal<T>(channels, frames, samplerate);
+    const auto interleaved = interleave(planar);
+
+    ebur128::state from_interleaved(ebur128::channel{channels},
+                                    ebur128::samplerate{samplerate},
+                                    planar_test_mode);
+    ebur128::state from_planar(ebur128::channel{channels},
+                               ebur128::samplerate{samplerate},
+                               planar_test_mode);
+    from_interleaved.add_frames(
+        ebur128::audio_data_view(interleaved, ebur128::channel{channels}));
+    const auto pointers = planar_channel_pointers(planar, 0);
+    from_planar.add_frames(
+        ebur128::planar_audio_data_view<T>(pointers, frames));
+
+    from_interleaved.add_frames(
+        ebur128::audio_data_view(std::span<const T>{},
+                                 ebur128::channel{channels}));
+    from_planar.add_frames(
+        ebur128::planar_audio_data_view<T>(std::span<const T* const>{}, 0));
+
+    return check_states_equal(from_interleaved, from_planar, channels);
+  };
+
+  return run.template operator()<float>() &&
+         run.template operator()<double>();
+}
+
 int main(int argc, char** argv) {
   const auto run_test = [&](std::string_view name, bool (*test)()) {
     std::string test_name(name);
@@ -1576,6 +1790,13 @@ int main(int argc, char** argv) {
   register_test(test_sample_peak);
   register_test(test_prev_true_peak);
   register_test(test_prev_sample_peak);
+  register_test(test_planar_interleaved_equivalence<float>);
+  register_test(test_planar_interleaved_equivalence<double>);
+  register_test(test_planar_chunked_feeding<float>);
+  register_test(test_planar_chunked_feeding<double>);
+  register_test(test_planar_unaligned_zero_tail<float>);
+  register_test(test_planar_unaligned_zero_tail<double>);
+  register_test(test_planar_zero_frames);
   register_test_all_types(test_signal_1);
   register_test_all_types(test_signal_2);
   register_test_all_types(test_signal_3);

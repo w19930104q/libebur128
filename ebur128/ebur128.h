@@ -228,6 +228,30 @@ int ebur128_add_frames_double(ebur128_state* st,
                               const double* src,
                               size_t frames);
 
+/** \brief Add frames to be processed.
+ *
+ *  Same as \ref ebur128_add_frames_float, but for planar (non-interleaved)
+ *  sample buffers, as commonly used by audio engines. This avoids having to
+ *  interleave the data before feeding it to the library. Processing a signal
+ *  with this function yields results bit-identical to processing the same
+ *  signal with \ref ebur128_add_frames_float.
+ *
+ *  @param st library state.
+ *  @param src array of pointers to per-channel sample buffers, one pointer
+ *             per channel. Each buffer must hold at least \p frames samples.
+ *  @param frames number of frames. Not number of samples!
+ *  @return
+ *    - EBUR128_SUCCESS on success.
+ *    - EBUR128_ERROR_NOMEM on memory allocation error.
+ */
+int ebur128_add_frames_planar_float(ebur128_state* st,
+                                    const float* const* src,
+                                    size_t frames);
+/** \brief See \ref ebur128_add_frames_planar_float */
+int ebur128_add_frames_planar_double(ebur128_state* st,
+                                     const double* const* src,
+                                     size_t frames);
+
 /** \brief Get global integrated loudness in LUFS.
  *
  *  @param st library state.
