@@ -533,7 +533,7 @@ static int ebur128_init_channel_map(ebur128_state* st) {
         case 0: st->d->channel_map[i] = EBUR128_LEFT; break;
         case 1: st->d->channel_map[i] = EBUR128_RIGHT; break;
         case 2: st->d->channel_map[i] = EBUR128_CENTER; break;
-        case 3: st->d->channel_map[i] = EBUR128_UNUSED; break;
+        case 3: st->d->channel_map[i] = EBUR128_LFE; break;
         case 4: st->d->channel_map[i] = EBUR128_LEFT_SURROUND; break;
         case 5: st->d->channel_map[i] = EBUR128_RIGHT_SURROUND; break;
         default: st->d->channel_map[i] = EBUR128_UNUSED; break;
@@ -972,6 +972,9 @@ int ebur128_set_channel(ebur128_state* st,
                         unsigned int channel_number,
                         int value) {
   if (channel_number >= st->channels) {
+    return EBUR128_ERROR_INVALID_CHANNEL_INDEX;
+  }
+  if (value < EBUR128_UNUSED || value > EBUR128_LFE) {
     return EBUR128_ERROR_INVALID_CHANNEL_INDEX;
   }
   if (value == EBUR128_DUAL_MONO && st->channels != 1) {

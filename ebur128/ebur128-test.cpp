@@ -289,6 +289,125 @@ static bool test_surround_channels() {
   return true;
 }
 
+static bool test_lfe_channel() {
+  constexpr std::size_t samplerate = 48000;
+  constexpr std::size_t frames = samplerate;
+  constexpr double frequency = 1000.0;
+  constexpr double amplitude = 0.25;
+
+  std::vector<double> sine(frames);
+  for (std::size_t i = 0; i < frames; ++i) {
+    sine[i] = amplitude * std::sin(2.0 * std::numbers::pi * frequency *
+                                   static_cast<double>(i) /
+                                   static_cast<double>(samplerate));
+  }
+
+  ebur128::state mono(ebur128::channel{1}, ebur128::samplerate{samplerate},
+                      ebur128::mode::i);
+  mono.add_frames(ebur128::audio_data_view(sine, ebur128::channel{1}));
+  const double mono_loudness = mono.loudness_global();
+
+  // A 5.1 signal: the LFE channel participates in the measurement with a
+  // gain of 0 dB, so the integrated loudness follows the spec formula
+  // L_K = -0.691 + 10 * log10(sum(G_i * z_i)) with G_LFE = 1.0.
+  {
+    std::vector<double> input(frames * 6);
+    for (std::size_t i = 0; i < frames; ++i) {
+      for (std::size_t c = 0; c < 6; ++c) {
+        input[i * 6 + c] = sine[i];
+      }
+    }
+
+    // Relies on the default channel map of a 6 channel state
+    // (L, R, C, LFE, Ls, Rs).
+    ebur128::state s(ebur128::channel{6}, ebur128::samplerate{samplerate},
+                     ebur128::mode::i);
+    s.add_frames(ebur128::audio_data_view(input, ebur128::channel{6}));
+
+    const double expected =
+        mono_loudness + 10.0 * std::log10(4.0 + 2.0 * 1.41);
+    assert(std::fabs(s.loudness_global() - expected) <= 1e-6);
+
+    // The LFE channel type can also be set explicitly in the channel map.
+    ebur128::state s2(ebur128::channel{6}, ebur128::samplerate{samplerate},
+                      ebur128::mode::i);
+    s2.set_channel(ebur128::channel{3}, EBUR128_LFE);
+    s2.add_frames(ebur128::audio_data_view(input, ebur128::channel{6}));
+    assert(std::fabs(s2.loudness_global() - expected) <= 1e-6);
+  }
+
+  // The LFE channel can be measured on its own.
+  {
+    std::vector<double> input(frames * 6, 0.0);
+    for (std::size_t i = 0; i < frames; ++i) {
+      input[i * 6 + 3] = sine[i];
+    }
+
+    ebur128::state s(ebur128::channel{6}, ebur128::samplerate{samplerate},
+                     ebur128::mode::i);
+    s.add_frames(ebur128::audio_data_view(input, ebur128::channel{6}));
+    assert(std::fabs(s.loudness_global() - mono_loudness) <= 1e-6);
+  }
+
+  // 5.0 and stereo results are unchanged by the LFE channel type.
+  {
+    std::vector<double> input_50(frames * 5);
+    std::vector<double> input_51(frames * 6, 0.0);
+    for (std::size_t i = 0; i < frames; ++i) {
+      for (std::size_t c = 0; c < 5; ++c) {
+        input_50[i * 5 + c] = sine[i];
+      }
+      input_51[i * 6 + 0] = sine[i];
+      input_51[i * 6 + 1] = sine[i];
+      input_51[i * 6 + 2] = sine[i];
+      input_51[i * 6 + 4] = sine[i];
+      input_51[i * 6 + 5] = sine[i];
+    }
+
+    ebur128::state s_50(ebur128::channel{5}, ebur128::samplerate{samplerate},
+                        ebur128::mode::i);
+    s_50.add_frames(ebur128::audio_data_view(input_50, ebur128::channel{5}));
+    const double expected_50 =
+        mono_loudness + 10.0 * std::log10(3.0 + 2.0 * 1.41);
+    assert(std::fabs(s_50.loudness_global() - expected_50) <= 1e-6);
+
+    // A silent LFE channel does not change the result.
+    ebur128::state s_51(ebur128::channel{6}, ebur128::samplerate{samplerate},
+                        ebur128::mode::i);
+    s_51.add_frames(ebur128::audio_data_view(input_51, ebur128::channel{6}));
+    assert(std::fabs(s_51.loudness_global() - s_50.loudness_global()) <= 1e-6);
+  }
+
+  // Invalid channel mappings are rejected.
+  {
+    ebur128::state s(ebur128::channel{6}, ebur128::samplerate{samplerate},
+                     ebur128::mode::i);
+
+    try {
+      s.set_channel(ebur128::channel{0}, static_cast<::channel>(-1));
+      assert(false);
+    } catch (const ebur128::invalid_channel_index_error&) {
+    }
+
+    try {
+      s.set_channel(ebur128::channel{0},
+                    static_cast<::channel>(EBUR128_LFE + 1));
+      assert(false);
+    } catch (const ebur128::invalid_channel_index_error&) {
+    }
+
+    try {
+      s.set_channel(ebur128::channel{6}, EBUR128_LFE);
+      assert(false);
+    } catch (const ebur128::invalid_channel_index_error&) {
+    }
+
+    s.set_channel(ebur128::channel{3}, EBUR128_LFE);
+  }
+
+  return true;
+}
+
 static bool test_loudness_window() {
   {
     ebur128::state s(ebur128::channel{1}, ebur128::samplerate{48000},
@@ -1555,6 +1674,7 @@ int main(int argc, char** argv) {
   register_test(test_set_channel);
   register_test(test_dual_mono);
   register_test(test_surround_channels);
+  register_test(test_lfe_channel);
   register_test(test_loudness_window);
   register_test(test_loudness_window_overflow);
   register_test(test_set_max_window);

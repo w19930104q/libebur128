@@ -23,7 +23,7 @@ extern "C" {
  *  See definitions in ITU R-REC-BS 1770-4
  */
 enum channel {
-  EBUR128_UNUSED = 0,         /**< unused channel (for example LFE channel) */
+  EBUR128_UNUSED = 0,         /**< unused channel */
   EBUR128_LEFT = 1,           /**<           */
   EBUR128_Mp030 = 1,          /**< itu M+030 */
   EBUR128_RIGHT = 2,          /**<           */
@@ -59,7 +59,9 @@ enum channel {
   EBUR128_Tp000,              /**< itu T+000 */
   EBUR128_Bp000,              /**< itu B+000 */
   EBUR128_Bp045,              /**< itu B+045 */
-  EBUR128_Bm045               /**< itu B-045 */
+  EBUR128_Bm045,              /**< itu B-045 */
+  EBUR128_LFE                 /**< low frequency effects channel. Counted with
+                                   a gain of 0 dB (1.0) after K-weighting. */
 };
 
 /** \enum error
@@ -138,7 +140,7 @@ void ebur128_destroy(ebur128_state** st);
  *  - 0 -> EBUR128_LEFT
  *  - 1 -> EBUR128_RIGHT
  *  - 2 -> EBUR128_CENTER
- *  - 3 -> EBUR128_UNUSED
+ *  - 3 -> EBUR128_LFE
  *  - 4 -> EBUR128_LEFT_SURROUND
  *  - 5 -> EBUR128_RIGHT_SURROUND
  *
@@ -147,7 +149,8 @@ void ebur128_destroy(ebur128_state** st);
  *  @param value channel type from the "channel" enum.
  *  @return
  *    - EBUR128_SUCCESS on success.
- *    - EBUR128_ERROR_INVALID_CHANNEL_INDEX if invalid channel index.
+ *    - EBUR128_ERROR_INVALID_CHANNEL_INDEX if invalid channel index or
+ *      invalid channel type.
  */
 int ebur128_set_channel(ebur128_state* st,
                         unsigned int channel_number,
