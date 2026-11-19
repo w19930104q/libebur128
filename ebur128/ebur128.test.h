@@ -15,6 +15,7 @@ class error : public std::runtime_error { using std::runtime_error::runtime_erro
 class nomem_error                 : public error { using ebur128::test::error::error; };
 class invalid_mode_error          : public error { using ebur128::test::error::error; };
 class invalid_channel_index_error : public error { using ebur128::test::error::error; };
+class invalid_factor_error        : public error { using ebur128::test::error::error; };
 class no_change_error             : public error { using ebur128::test::error::error; };
 // clang-format on
 
@@ -224,6 +225,20 @@ public:
         "ebur128_change_parameters");
   }
 
+  void set_true_peak_oversampling(unsigned int factor) {
+    state::handle_error(
+        [&] { return ebur128_set_true_peak_oversampling(state_, factor); },
+        "ebur128_set_true_peak_oversampling");
+  }
+
+  unsigned int true_peak_oversampling() const {
+    unsigned int factor = 0;
+    state::handle_error(
+        [&] { return ebur128_get_true_peak_oversampling(state_, &factor); },
+        "ebur128_get_true_peak_oversampling");
+    return factor;
+  }
+
   double true_peak(ebur128::test::channel channel) const {
     double out;
     state::handle_error(
@@ -294,6 +309,8 @@ private:
           throw ebur128::test::invalid_mode_error(msg);
         case EBUR128_ERROR_INVALID_CHANNEL_INDEX:
           throw ebur128::test::invalid_channel_index_error(msg);
+        case EBUR128_ERROR_INVALID_FACTOR:
+          throw ebur128::test::invalid_factor_error(msg);
         case EBUR128_ERROR_NO_CHANGE: //
           throw ebur128::test::no_change_error(msg);
       }

@@ -6,6 +6,8 @@ EXPORTS
 	ebur128_destroy
 	ebur128_set_channel
 	ebur128_change_parameters
+	ebur128_set_true_peak_oversampling
+	ebur128_get_true_peak_oversampling
 	ebur128_set_max_window
 	ebur128_set_max_history
 	ebur128_add_frames_short

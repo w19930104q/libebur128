@@ -1389,6 +1389,153 @@ static bool test_true_peak() {
   return true;
 }
 
+static bool test_true_peak_oversampling_validation() {
+  ebur128::state s(ebur128::channel{1}, ebur128::samplerate{48000},
+                   ebur128::mode::true_peak);
+
+  // Default is the automatic, sample rate dependent factor (4x at 48 kHz).
+  assert(s.true_peak_oversampling() == 4u);
+
+  // Re-selecting auto when already in auto mode is reported as no change.
+  try {
+    s.set_true_peak_oversampling(EBUR128_AUTO_TRUE_PEAK_FACTOR);
+    assert(false);
+  } catch (const ebur128::no_change_error&) {
+  }
+
+  // Valid powers of two >= 4 are accepted and take effect immediately.
+  for (unsigned int factor : {4u, 8u, 16u, 32u, 64u}) {
+    s.set_true_peak_oversampling(factor);
+    assert(s.true_peak_oversampling() == factor);
+  }
+
+  // Setting the same factor again is a no-op.
+  try {
+    s.set_true_peak_oversampling(64u);
+    assert(false);
+  } catch (const ebur128::no_change_error&) {
+  }
+
+  // Invalid factors are rejected with a dedicated error.
+  for (unsigned int factor : {1u, 2u, 3u, 5u, 6u, 7u, 9u, 10u, 12u, 100u}) {
+    try {
+      s.set_true_peak_oversampling(factor);
+      assert(false);
+    } catch (const ebur128::invalid_factor_error&) {
+    }
+  }
+
+  // A rejected factor must not alter the active configuration.
+  assert(s.true_peak_oversampling() == 64u);
+
+  // Returning to automatic mode restores the sample rate dependent factor.
+  s.set_true_peak_oversampling(EBUR128_AUTO_TRUE_PEAK_FACTOR);
+  assert(s.true_peak_oversampling() == 4u);
+
+  return true;
+}
+
+static bool test_true_peak_oversampling_auto_factors() {
+  struct rate_case {
+    unsigned long samplerate;
+    unsigned int factor;
+  };
+  const rate_case cases[] = {{44100, 4},  {48000, 4},  {88200, 4},
+                             {95999, 4},  {96000, 2},  {191999, 2},
+                             {192000, 1}, {384000, 1}};
+
+  for (const auto& c : cases) {
+    ebur128::state s(ebur128::channel{1}, ebur128::samplerate{c.samplerate},
+                     ebur128::mode::true_peak);
+    assert(s.true_peak_oversampling() == c.factor);
+  }
+  return true;
+}
+
+static bool test_true_peak_oversampling_takes_effect() {
+  constexpr std::size_t frames = 4800;
+  constexpr double amplitude = 0.9;
+
+  // A discontinuous sign-alternating signal whose true peak depends strongly
+  // on the interpolation factor.
+  std::vector<double> input(frames);
+  for (std::size_t i = 0; i < frames; ++i) {
+    input[i] = (i % 4 < 2 ? amplitude : -amplitude);
+  }
+
+  auto measure = [&](unsigned int factor) {
+    ebur128::state s(ebur128::channel{1}, ebur128::samplerate{48000},
+                     ebur128::mode::true_peak);
+    s.set_true_peak_oversampling(factor);
+    assert(s.true_peak_oversampling() == factor);
+    s.add_frames(ebur128::audio_data_view(input, ebur128::channel{1}));
+    return s.true_peak(ebur128::channel{0});
+  };
+
+  const double peak_4 = measure(4u);
+  const double peak_32 = measure(32u);
+
+  // The configuration changes the numerical result.
+  assert(std::fabs(peak_32 - peak_4) > 1e-6);
+  // The lowest factor reveals ringing above the raw sample peak.
+  assert(peak_4 > amplitude);
+  // The highest factor converges back toward the band-limited sample peak.
+  assert(std::fabs(peak_32 - amplitude) <= std::fabs(peak_4 - amplitude));
+  return true;
+}
+
+static bool test_true_peak_oversampling_default_compatibility() {
+  constexpr std::size_t frames = 48000;
+  std::vector<double> input(frames);
+  for (std::size_t i = 0; i < frames; ++i) {
+    input[i] = 0.85 * std::sin(2.0 * std::numbers::pi * 12345.0 *
+                                static_cast<double>(i) / 48000.0);
+  }
+
+  for (unsigned long samplerate : {44100UL, 48000UL, 96000UL, 192000UL}) {
+    // Pure default path: never call the setter.
+    ebur128::state def(ebur128::channel{1}, ebur128::samplerate{samplerate},
+                       ebur128::mode::true_peak);
+    def.add_frames(ebur128::audio_data_view(input, ebur128::channel{1}));
+    const double default_peak = def.true_peak(ebur128::channel{0});
+
+    // Explicitly selecting auto must produce a bit-identical result. On a
+    // fresh state auto is already active, so the setter may report no change.
+    ebur128::state autosel(ebur128::channel{1},
+                           ebur128::samplerate{samplerate},
+                           ebur128::mode::true_peak);
+    try {
+      autosel.set_true_peak_oversampling(EBUR128_AUTO_TRUE_PEAK_FACTOR);
+    } catch (const ebur128::no_change_error&) {
+    }
+    autosel.add_frames(
+        ebur128::audio_data_view(input, ebur128::channel{1}));
+    const double auto_peak = autosel.true_peak(ebur128::channel{0});
+
+    assert(def.true_peak_oversampling() == autosel.true_peak_oversampling());
+    assert(default_peak == auto_peak);
+  }
+  return true;
+}
+
+static bool test_true_peak_oversampling_change_parameters() {
+  ebur128::state s(ebur128::channel{1}, ebur128::samplerate{48000},
+                   ebur128::mode::true_peak);
+  s.set_true_peak_oversampling(8u);
+
+  // A fixed factor survives sample rate changes, even into the 192 kHz range
+  // where automatic mode would disable oversampling.
+  s.change_parameters(ebur128::channel{1}, ebur128::samplerate{96000});
+  assert(s.true_peak_oversampling() == 8u);
+  s.change_parameters(ebur128::channel{1}, ebur128::samplerate{192000});
+  assert(s.true_peak_oversampling() == 8u);
+
+  // Automatic mode follows the sample rate again.
+  s.set_true_peak_oversampling(EBUR128_AUTO_TRUE_PEAK_FACTOR);
+  assert(s.true_peak_oversampling() == 1u);
+  return true;
+}
+
 static bool test_sample_peak() {
   {
     ebur128::state s(ebur128::channel{2}, ebur128::samplerate{48000},
@@ -1573,6 +1720,11 @@ int main(int argc, char** argv) {
   register_test(test_momentary_loudness);
   register_test(test_shortterm_loudness);
   register_test(test_true_peak);
+  register_test(test_true_peak_oversampling_validation);
+  register_test(test_true_peak_oversampling_auto_factors);
+  register_test(test_true_peak_oversampling_takes_effect);
+  register_test(test_true_peak_oversampling_default_compatibility);
+  register_test(test_true_peak_oversampling_change_parameters);
   register_test(test_sample_peak);
   register_test(test_prev_true_peak);
   register_test(test_prev_sample_peak);

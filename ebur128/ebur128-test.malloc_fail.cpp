@@ -97,6 +97,14 @@ void run_workload(bool histogram,
     return;
   }
 
+  /* Reconfiguring true peak oversampling rebuilds the resampler, exercising
+   * its allocation failure paths as well. */
+  result = ebur128_set_true_peak_oversampling(state, 8);
+  if (!check_result(result) || injected_failure) {
+    ebur128_destroy(&state);
+    return;
+  }
+
   result = ebur128_add_frames_double(state, quad_input.data(),
                                      quad_input.size() / 4);
   (void) check_result(result);

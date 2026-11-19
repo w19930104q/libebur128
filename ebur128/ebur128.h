@@ -70,7 +70,8 @@ enum error {
   EBUR128_ERROR_NOMEM,
   EBUR128_ERROR_INVALID_MODE,
   EBUR128_ERROR_INVALID_CHANNEL_INDEX,
-  EBUR128_ERROR_NO_CHANGE
+  EBUR128_ERROR_NO_CHANGE,
+  EBUR128_ERROR_INVALID_FACTOR
 };
 
 /** \enum mode
@@ -93,6 +94,15 @@ enum mode {
   /** uses histogram algorithm to calculate loudness */
   EBUR128_MODE_HISTOGRAM = (1 << 6)
 };
+
+/**
+ *  Pass this value to ebur128_set_true_peak_oversampling() to restore the
+ *  default, sample rate dependent oversampling behaviour:
+ *  - 4x oversampling for sample rates < 96000 Hz
+ *  - 2x oversampling for sample rates < 192000 Hz
+ *  - no oversampling for sample rates >= 192000 Hz
+ */
+#define EBUR128_AUTO_TRUE_PEAK_FACTOR 0u
 
 /** forward declaration of ebur128_state_internal */
 struct ebur128_state_internal;
@@ -170,6 +180,48 @@ int ebur128_set_channel(ebur128_state* st,
 int ebur128_change_parameters(ebur128_state* st,
                               unsigned int channels,
                               unsigned long samplerate);
+
+/** \brief Configure the oversampling factor used for true peak detection.
+ *
+ *  By default the oversampling factor is chosen internally based on the sample
+ *  rate (see the ebur128_true_peak() documentation). This function allows
+ *  overriding that choice with a fixed factor, which is useful for mastering
+ *  workflows that require more accurate true peak detection.
+ *
+ *  The factor must be a power of two of at least 4, as required by the
+ *  BS.1770 true peak measurement specification. Pass
+ *  EBUR128_AUTO_TRUE_PEAK_FACTOR to restore the default, sample rate dependent
+ *  behaviour.
+ *
+ *  Changing the factor destroys the current content of the resampler buffers,
+ *  but all previously measured true peak maxima are preserved. The factor
+ *  persists across ebur128_change_parameters() calls.
+ *
+ *  @param st library state.
+ *  @param factor oversampling factor (a power of two >= 4), or
+ *                EBUR128_AUTO_TRUE_PEAK_FACTOR for the default behaviour.
+ *  @return
+ *    - EBUR128_SUCCESS on success.
+ *    - EBUR128_ERROR_INVALID_FACTOR if factor is not a power of two of at
+ *      least 4.
+ *    - EBUR128_ERROR_NOMEM on memory allocation error. The state will be
+ *      invalid and must be destroyed.
+ */
+int ebur128_set_true_peak_oversampling(ebur128_state* st, unsigned int factor);
+
+/** \brief Get the oversampling factor currently used for true peak detection.
+ *
+ *  Returns the factor that is actually applied when processing frames:
+ *  - if a fixed factor was configured with
+ *    ebur128_set_true_peak_oversampling(), that factor is returned;
+ *  - in automatic mode (EBUR128_AUTO_TRUE_PEAK_FACTOR) the sample rate
+ *    dependent factor is returned (4, 2 or 1 for no oversampling).
+ *
+ *  @param st library state.
+ *  @param factor pointer that receives the effective oversampling factor.
+ *  @return EBUR128_SUCCESS on success.
+ */
+int ebur128_get_true_peak_oversampling(ebur128_state* st, unsigned int* factor);
 
 /** \brief Set the maximum window duration.
  *
@@ -361,8 +413,10 @@ int ebur128_prev_sample_peak(ebur128_state* st,
  *  as the algorithm may change.
  *
  *  The current implementation uses a custom polyphase FIR interpolator to
- *  calculate true peak. Will oversample 4x for sample rates < 96000 Hz, 2x for
- *  sample rates < 192000 Hz and leave the signal unchanged for 192000 Hz.
+ *  calculate true peak. By default it will oversample 4x for sample rates
+ *  < 96000 Hz, 2x for sample rates < 192000 Hz and leave the signal unchanged
+ *  for 192000 Hz. The oversampling factor can be overridden with
+ *  ebur128_set_true_peak_oversampling().
  *
  *  The equation to convert to dBTP is: 20 * log10(out)
  *
@@ -386,8 +440,10 @@ int ebur128_true_peak(ebur128_state* st,
  *  as the algorithm may change.
  *
  *  The current implementation uses a custom polyphase FIR interpolator to
- *  calculate true peak. Will oversample 4x for sample rates < 96000 Hz, 2x for
- *  sample rates < 192000 Hz and leave the signal unchanged for 192000 Hz.
+ *  calculate true peak. By default it will oversample 4x for sample rates
+ *  < 96000 Hz, 2x for sample rates < 192000 Hz and leave the signal unchanged
+ *  for 192000 Hz. The oversampling factor can be overridden with
+ *  ebur128_set_true_peak_oversampling().
  *
  *  The equation to convert to dBTP is: 20 * log10(out)
  *

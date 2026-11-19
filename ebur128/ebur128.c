@@ -198,6 +198,10 @@ struct ebur128_state_internal {
   size_t resampler_buffer_input_frames;
   float* resampler_buffer_output;
   size_t resampler_buffer_output_frames;
+  /** Configured oversampling factor for true peak detection.
+   *  EBUR128_AUTO_TRUE_PEAK_FACTOR means the factor is chosen based on the
+   *  sample rate. */
+  unsigned int true_peak_factor;
   /** The maximum window duration in ms. */
   unsigned long window;
   unsigned long history;
@@ -543,21 +547,54 @@ static int ebur128_init_channel_map(ebur128_state* st) {
   return EBUR128_SUCCESS;
 }
 
-static int ebur128_init_resampler(ebur128_state* st) {
-  int errcode = EBUR128_SUCCESS;
+/* Returns the oversampling factor that is actually in effect: either the
+ * explicitly configured factor or the sample rate dependent default. A
+ * returned factor of 1 means that no oversampling is performed. */
+static unsigned int ebur128_effective_true_peak_factor(
+    const ebur128_state* st) {
+  unsigned int factor;
+
+  if (st->d->true_peak_factor != EBUR128_AUTO_TRUE_PEAK_FACTOR) {
+    return st->d->true_peak_factor;
+  }
 
   if (st->samplerate < 96000) {
-    st->d->interp = interp_create(49, 4, st->channels);
-    CHECK_ERROR(!st->d->interp, EBUR128_ERROR_NOMEM, exit)
+    factor = 4;
   } else if (st->samplerate < 192000) {
-    st->d->interp = interp_create(49, 2, st->channels);
-    CHECK_ERROR(!st->d->interp, EBUR128_ERROR_NOMEM, exit)
+    factor = 2;
   } else {
+    factor = 1;
+  }
+  return factor;
+}
+
+/* Validates a user supplied oversampling factor. A factor must be a power of
+ * two of at least 4, or EBUR128_AUTO_TRUE_PEAK_FACTOR for the default
+ * behaviour. */
+static int ebur128_validate_true_peak_factor(unsigned int factor) {
+  if (factor == EBUR128_AUTO_TRUE_PEAK_FACTOR) {
+    return EBUR128_SUCCESS;
+  }
+  if (factor < 4u || (factor & (factor - 1u)) != 0u) {
+    return EBUR128_ERROR_INVALID_FACTOR;
+  }
+  return EBUR128_SUCCESS;
+}
+
+static int ebur128_init_resampler(ebur128_state* st) {
+  int errcode = EBUR128_SUCCESS;
+  unsigned int factor;
+
+  factor = ebur128_effective_true_peak_factor(st);
+  if (factor == 1u) {
     st->d->resampler_buffer_input = NULL;
     st->d->resampler_buffer_output = NULL;
     st->d->interp = NULL;
     goto exit;
   }
+
+  st->d->interp = interp_create(49, factor, st->channels);
+  CHECK_ERROR(!st->d->interp, EBUR128_ERROR_NOMEM, exit)
 
   st->d->resampler_buffer_input_frames = st->d->samples_in_100ms * 4;
   st->d->resampler_buffer_input = (float*) malloc(
@@ -692,6 +729,7 @@ ebur128_init(unsigned int channels, unsigned long samplerate, int mode) {
   st->d->st_block_list_size = 0;
   st->d->st_block_list_max = st->d->history / 3000;
 
+  st->d->true_peak_factor = EBUR128_AUTO_TRUE_PEAK_FACTOR;
   result = ebur128_init_resampler(st);
   CHECK_ERROR(result, 0, free_short_term_block_energy_histogram)
 
@@ -1056,6 +1094,35 @@ int ebur128_change_parameters(ebur128_state* st,
 
 exit:
   return errcode;
+}
+
+int ebur128_set_true_peak_oversampling(ebur128_state* st,
+                                        unsigned int factor) {
+  int errcode;
+
+  errcode = ebur128_validate_true_peak_factor(factor);
+  if (errcode != EBUR128_SUCCESS) {
+    return errcode;
+  }
+
+  if (factor == st->d->true_peak_factor) {
+    return EBUR128_ERROR_NO_CHANGE;
+  }
+
+  st->d->true_peak_factor = factor;
+  ebur128_destroy_resampler(st);
+
+  errcode = ebur128_init_resampler(st);
+  CHECK_ERROR(errcode, errcode, exit)
+
+exit:
+  return errcode;
+}
+
+int ebur128_get_true_peak_oversampling(ebur128_state* st,
+                                        unsigned int* factor) {
+  *factor = ebur128_effective_true_peak_factor(st);
+  return EBUR128_SUCCESS;
 }
 
 int ebur128_set_max_window(ebur128_state* st, unsigned long window) {
