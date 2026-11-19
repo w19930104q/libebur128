@@ -1116,6 +1116,19 @@ int ebur128_set_max_history(ebur128_state* st, unsigned long history) {
 
 static int ebur128_energy_shortterm(ebur128_state* st, double* out);
 
+/* Consumes the current gating block: the next block only needs 100ms of
+ * audio data, and the ring buffer index wraps around. This must also run
+ * when recording the block fails with a NOMEM error, so that the state
+ * stays consistent and usable afterwards. */
+static void ebur128_consume_gating_block(ebur128_state* st) {
+  /* 100ms are needed for all blocks besides the first one */
+  st->d->needed_frames = st->d->samples_in_100ms;
+  /* reset audio_data_index when buffer full */
+  if (st->d->audio_data_index == st->d->audio_data_frames * st->channels) {
+    st->d->audio_data_index = 0;
+  }
+}
+
 #define EBUR128_ADD_FRAMES(type)                                               \
   int ebur128_add_frames_##type(ebur128_state* st, const type* src,            \
                                 size_t frames) {                               \
@@ -1135,6 +1148,7 @@ static int ebur128_energy_shortterm(ebur128_state* st, double* out);
         if ((st->mode & EBUR128_MODE_I) == EBUR128_MODE_I) {                   \
           if (ebur128_calc_gating_block(st, st->d->samples_in_100ms * 4,       \
                                         NULL)) {                               \
+            ebur128_consume_gating_block(st);                                  \
             return EBUR128_ERROR_NOMEM;                                        \
           }                                                                    \
         }                                                                      \
@@ -1163,6 +1177,9 @@ static int ebur128_energy_shortterm(ebur128_state* st, double* out);
                   block = (struct ebur128_dq_entry*) malloc(                   \
                       sizeof(struct ebur128_dq_entry));                        \
                   if (!block) {                                                \
+                    st->d->short_term_frame_counter =                          \
+                        st->d->samples_in_100ms * 20;                          \
+                    ebur128_consume_gating_block(st);                          \
                     return EBUR128_ERROR_NOMEM;                                \
                   }                                                            \
                   st->d->st_block_list_size++;                                 \
@@ -1176,13 +1193,7 @@ static int ebur128_energy_shortterm(ebur128_state* st, double* out);
             st->d->short_term_frame_counter = st->d->samples_in_100ms * 20;    \
           }                                                                    \
         }                                                                      \
-        /* 100ms are needed for all blocks besides the first one */            \
-        st->d->needed_frames = st->d->samples_in_100ms;                        \
-        /* reset audio_data_index when buffer full */                          \
-        if (st->d->audio_data_index ==                                         \
-            st->d->audio_data_frames * st->channels) {                         \
-          st->d->audio_data_index = 0;                                         \
-        }                                                                      \
+        ebur128_consume_gating_block(st);                                      \
       } else {                                                                 \
         ebur128_filter_##type(st, src + src_index, frames);                    \
         st->d->audio_data_index += frames * st->channels;                      \

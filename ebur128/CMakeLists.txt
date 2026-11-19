@@ -150,7 +150,8 @@ if(BUILD_TESTING)
       POSITION_INDEPENDENT_CODE ON)
     target_compile_definitions(ebur128.malloc_fail PRIVATE
       malloc=ebur128_test_malloc
-      calloc=ebur128_test_calloc)
+      calloc=ebur128_test_calloc
+      free=ebur128_test_free)
 
     add_executable(ebur128-test.malloc_fail ebur128-test.malloc_fail.cpp)
     target_compile_features(ebur128-test.malloc_fail PRIVATE cxx_std_20)
